@@ -1,0 +1,13 @@
+[project]
+name = "extropic-baseline"
+version = "0.1.0"
+description = "Image denoising baseline with JAX bilateral filter and GPU power monitoring"
+requires-python = ">=3.10"
+dependencies = [
+    "jax[cuda12]>=0.6.2",  # Shared with parent project - uv will reuse if already installed
+    "nvidia-ml-py",  # GPU power monitoring (replaces deprecated pynvml)
+    "rich",
+    "numpy",
+    "pillow",
+]
+

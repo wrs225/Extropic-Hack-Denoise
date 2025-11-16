@@ -1,0 +1,282 @@
+"""Main pipeline for image denoising baseline comparison."""
+
+import argparse
+import sys
+from pathlib import Path
+import numpy as np
+from datetime import datetime
+
+# Import JAX to verify GPU
+try:
+    import jax
+    import jax.numpy as jnp
+    print(f"JAX devices: {jax.devices()}")
+except ImportError:
+    print("Warning: JAX not available")
+    sys.exit(1)
+
+# Import our modules
+from s1_input.loader import load_image, load_images_from_dir, quantize_to_3bit, dequantize_from_3bit, save_image
+from s1_input.noise_gen import add_gaussian_noise, NoiseGenerator
+from s2a_baseline.bilateral_filter import bilateral_filter, BilateralFilterJAX
+from s3_results.benchmark import GPUPowerMonitor, benchmark_function
+from s3_results.metrics import calculate_psnr, calculate_ssim, calculate_efficiency_metrics, export_results_to_json
+from s3_results.visualizer import display_metrics, visualize_power_consumption, display_comparison
+
+
+def verify_gpu():
+    """Verify GPU is available."""
+    devices = jax.devices()
+    gpu_devices = [d for d in devices if d.device_kind == 'gpu']
+    
+    if len(gpu_devices) == 0:
+        print("Warning: No GPU devices found. Will use CPU (slower).")
+        return False
+    else:
+        print(f"Found {len(gpu_devices)} GPU device(s): {gpu_devices}")
+        return True
+
+
+def create_toy_example():
+    """Create a synthetic 3-bit grayscale image for testing."""
+    # Create a simple test pattern
+    H, W = 256, 256
+    
+    # Create gradient pattern
+    y_coords, x_coords = np.meshgrid(
+        np.linspace(0, 1, H),
+        np.linspace(0, 1, W),
+        indexing='ij'
+    )
+    
+    # Create pattern with circles
+    center_y, center_x = 0.5, 0.5
+    radius = 0.3
+    dist = np.sqrt((y_coords - center_y)**2 + (x_coords - center_x)**2)
+    pattern = np.exp(-dist / radius)
+    
+    # Quantize to 3-bit
+    quantized = quantize_to_3bit(pattern)
+    
+    # Dequantize back to [0, 1]
+    image = dequantize_from_3bit(quantized)
+    
+    return image
+
+
+def run_toy_example():
+    """Run a toy example to verify everything works."""
+    print("\n" + "="*60)
+    print("Running Toy Example")
+    print("="*60)
+    
+    # Verify GPU
+    has_gpu = verify_gpu()
+    
+    # Create toy image
+    print("\nCreating synthetic 3-bit grayscale image...")
+    clean_image = create_toy_example()
+    print(f"Image shape: {clean_image.shape}, range: [{clean_image.min():.3f}, {clean_image.max():.3f}]")
+    
+    # Add noise
+    print("\nAdding Gaussian noise (15% std dev)...")
+    noisy_image = add_gaussian_noise(clean_image, sigma=0.15, seed=42)
+    print(f"Noisy image range: [{noisy_image.min():.3f}, {noisy_image.max():.3f}]")
+    
+    # Apply bilateral filter
+    print("\nApplying bilateral filter...")
+    filter_obj = BilateralFilterJAX(d=9, sigma_color=75.0, sigma_space=75.0)
+    
+    # First run (JIT compilation)
+    print("  First run (JIT compilation)...")
+    start = datetime.now()
+    denoised = filter_obj.denoise(noisy_image)
+    first_time = (datetime.now() - start).total_seconds() * 1000
+    print(f"  First run time: {first_time:.2f} ms")
+    
+    # Second run (should be faster)
+    print("  Second run (after JIT)...")
+    start = datetime.now()
+    denoised = filter_obj.denoise(noisy_image)
+    second_time = (datetime.now() - start).total_seconds() * 1000
+    print(f"  Second run time: {second_time:.2f} ms")
+    
+    if second_time < first_time:
+        print(f"  ✓ JIT compilation working (speedup: {first_time/second_time:.2f}x)")
+    else:
+        print("  ⚠ JIT may not be working as expected")
+    
+    # Calculate metrics
+    print("\nCalculating quality metrics...")
+    psnr = calculate_psnr(clean_image, denoised)
+    ssim = calculate_ssim(clean_image, denoised)
+    print(f"  PSNR: {psnr:.2f} dB")
+    print(f"  SSIM: {ssim:.4f}")
+    
+    # Test power monitoring
+    print("\nTesting power monitoring...")
+    monitor = GPUPowerMonitor(gpu_id=0)
+    with monitor:
+        _ = filter_obj.denoise(noisy_image)
+    
+    print(f"  Energy: {monitor.total_energy_j:.3f} J")
+    print(f"  Avg Power: {monitor.avg_power_w:.2f} W")
+    print(f"  Duration: {monitor.duration_s:.3f} s")
+    
+    # Save results
+    output_dir = Path("s0_data/results")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    save_image(clean_image, output_dir / "toy_clean.png")
+    save_image(noisy_image, output_dir / "toy_noisy.png")
+    save_image(denoised, output_dir / "toy_denoised.png")
+    print(f"\nSaved images to {output_dir}/")
+    
+    print("\n✓ Toy example completed successfully!")
+    return True
+
+
+def benchmark_image(
+    image_path: str,
+    noise_level: float = 0.15,
+    n_warmup: int = 5,
+    n_runs: int = 20,
+    save_images: bool = False,
+):
+    """Benchmark denoising on a single image."""
+    print("\n" + "="*60)
+    print(f"Benchmarking: {image_path}")
+    print("="*60)
+    
+    # Load image
+    print("\nLoading image...")
+    clean_image = load_image(image_path, target_size=(256, 256))
+    print(f"Image shape: {clean_image.shape}")
+    
+    # Quantize to 3-bit
+    quantized = quantize_to_3bit(clean_image)
+    clean_3bit = dequantize_from_3bit(quantized)
+    
+    # Add noise
+    print(f"\nAdding Gaussian noise (sigma={noise_level})...")
+    noisy_image = add_gaussian_noise(clean_3bit, sigma=noise_level, seed=42)
+    
+    # Create filter
+    filter_obj = BilateralFilterJAX(d=9, sigma_color=75.0, sigma_space=75.0)
+    
+    # Benchmark
+    print("\nRunning benchmark...")
+    def denoise_fn():
+        return filter_obj.denoise(noisy_image)
+    
+    results = benchmark_function(
+        denoise_fn,
+        n_warmup=n_warmup,
+        n_runs=n_runs,
+        gpu_id=0,
+    )
+    
+    # Get one denoised result for metrics
+    denoised = denoise_fn()
+    
+    # Calculate quality metrics
+    psnr = calculate_psnr(clean_3bit, denoised)
+    ssim = calculate_ssim(clean_3bit, denoised)
+    
+    # Calculate efficiency metrics
+    efficiency = calculate_efficiency_metrics(psnr, results['mean_energy_j'], clean_3bit.shape)
+    
+    # Combine results
+    full_results = {
+        **results,
+        'psnr': psnr,
+        'ssim': ssim,
+        **efficiency,
+        'image_path': str(image_path),
+        'noise_level': noise_level,
+    }
+    
+    # Display results
+    print("\n" + "="*60)
+    print("Results")
+    print("="*60)
+    display_metrics(full_results)
+    
+    # Save results
+    if save_images:
+        output_dir = Path("s0_data/results")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_image(clean_3bit, output_dir / f"clean_{timestamp}.png")
+        save_image(noisy_image, output_dir / f"noisy_{timestamp}.png")
+        save_image(denoised, output_dir / f"denoised_{timestamp}.png")
+        print(f"\nSaved images to {output_dir}/")
+    
+    # Export JSON
+    json_path = Path("s0_data/results") / f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    export_results_to_json(full_results, json_path)
+    print(f"\nResults saved to {json_path}")
+    
+    return full_results
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(description="Image denoising baseline pipeline")
+    parser.add_argument(
+        '--toy',
+        action='store_true',
+        help='Run toy example to verify setup'
+    )
+    parser.add_argument(
+        '--image',
+        type=str,
+        help='Path to input image'
+    )
+    parser.add_argument(
+        '--noise-level',
+        type=float,
+        default=0.15,
+        help='Noise level (std dev as fraction, default 0.15 = 15%%)'
+    )
+    parser.add_argument(
+        '--n-warmup',
+        type=int,
+        default=5,
+        help='Number of warmup runs (default: 5)'
+    )
+    parser.add_argument(
+        '--n-runs',
+        type=int,
+        default=20,
+        help='Number of benchmark runs (default: 20)'
+    )
+    parser.add_argument(
+        '--save-images',
+        action='store_true',
+        help='Save output images'
+    )
+    
+    args = parser.parse_args()
+    
+    if args.toy:
+        success = run_toy_example()
+        sys.exit(0 if success else 1)
+    elif args.image:
+        benchmark_image(
+            args.image,
+            noise_level=args.noise_level,
+            n_warmup=args.n_warmup,
+            n_runs=args.n_runs,
+            save_images=args.save_images,
+        )
+    else:
+        parser.print_help()
+        print("\nUse --toy to run a toy example or --image <path> to benchmark an image.")
+
+
+if __name__ == "__main__":
+    main()
+
