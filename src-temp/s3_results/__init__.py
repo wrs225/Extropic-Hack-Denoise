@@ -1,7 +1,7 @@
 """Benchmarking and visualization module."""
 
 from .benchmark import GPUPowerMonitor, benchmark_function
-from .metrics import calculate_psnr, calculate_ssim, calculate_efficiency_metrics
+from .metrics import calculate_psnr, calculate_ssim, calculate_efficiency_metrics, calculate_improvement_metrics
 from .visualizer import visualize_power_consumption, display_metrics
 
 __all__ = [
@@ -10,6 +10,7 @@ __all__ = [
     "calculate_psnr",
     "calculate_ssim",
     "calculate_efficiency_metrics",
+    "calculate_improvement_metrics",
     "visualize_power_consumption",
     "display_metrics",
 ]

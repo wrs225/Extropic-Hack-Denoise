@@ -17,17 +17,20 @@ except ImportError:
 
 # Import our modules
 from s1_input.loader import load_image, load_images_from_dir, quantize_to_3bit, dequantize_from_3bit, save_image
+from PIL import Image, ImageDraw, ImageFont
 from s1_input.noise_gen import add_gaussian_noise, NoiseGenerator
 from s2a_baseline.bilateral_filter import bilateral_filter, BilateralFilterJAX
 from s3_results.benchmark import GPUPowerMonitor, benchmark_function
-from s3_results.metrics import calculate_psnr, calculate_ssim, calculate_efficiency_metrics, export_results_to_json
+from s3_results.metrics import calculate_psnr, calculate_ssim, calculate_efficiency_metrics, calculate_improvement_metrics, export_results_to_json
 from s3_results.visualizer import display_metrics, visualize_power_consumption, display_comparison
 
 
 def verify_gpu():
     """Verify GPU is available."""
     devices = jax.devices()
-    gpu_devices = [d for d in devices if d.device_kind == 'gpu']
+    # Check for GPU devices - look for 'cuda' or 'gpu' in device string
+    # JAX CUDA devices show as "CudaDevice(id=0)" or similar
+    gpu_devices = [d for d in devices if 'cuda' in str(d).lower() or 'gpu' in str(d).lower()]
     
     if len(gpu_devices) == 0:
         print("Warning: No GPU devices found. Will use CPU (slower).")
@@ -35,6 +38,139 @@ def verify_gpu():
     else:
         print(f"Found {len(gpu_devices)} GPU device(s): {gpu_devices}")
         return True
+
+
+def create_comparison_image(
+    clean: np.ndarray,
+    noisy: np.ndarray,
+    denoised: np.ndarray,
+    output_path: Path,
+    psnr: float = None,
+    ssim: float = None,
+    improvement: dict = None,
+):
+    """
+    Create a side-by-side comparison image with labels.
+    
+    Args:
+        clean: Clean reference image
+        noisy: Noisy input image
+        denoised: Denoised output image
+        output_path: Path to save the comparison image
+        psnr: Optional PSNR value to display
+        ssim: Optional SSIM value to display
+    """
+    # Convert images to uint8 for PIL
+    def to_uint8(img):
+        img_clipped = np.clip(img, 0.0, 1.0)
+        return (img_clipped * 255.0).astype(np.uint8)
+    
+    clean_uint8 = to_uint8(clean)
+    noisy_uint8 = to_uint8(noisy)
+    denoised_uint8 = to_uint8(denoised)
+    
+    # Get image dimensions
+    H, W = clean_uint8.shape
+    padding = 10
+    label_height = 40
+    spacing = 20
+    
+    # Create combined image: 3 images side by side
+    total_width = W * 3 + spacing * 2 + padding * 2
+    total_height = H + label_height * 2 + padding * 2
+    
+    # Create white background
+    combined = Image.new('RGB', (total_width, total_height), color='white')
+    
+    # Paste images
+    x_offset = padding
+    y_offset = padding + label_height
+    
+    # Clean image
+    clean_pil = Image.fromarray(clean_uint8, mode='L')
+    combined.paste(clean_pil, (x_offset, y_offset))
+    
+    # Noisy image
+    x_offset += W + spacing
+    noisy_pil = Image.fromarray(noisy_uint8, mode='L')
+    combined.paste(noisy_pil, (x_offset, y_offset))
+    
+    # Denoised image
+    x_offset += W + spacing
+    denoised_pil = Image.fromarray(denoised_uint8, mode='L')
+    combined.paste(denoised_pil, (x_offset, y_offset))
+    
+    # Add labels
+    draw = ImageDraw.Draw(combined)
+    
+    # Try to use a nice font, fallback to default if not available
+    try:
+        font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
+    except:
+        try:
+            font_large = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", 24)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", 16)
+        except:
+            font_large = ImageFont.load_default()
+            font_small = ImageFont.load_default()
+    
+    # Top labels
+    y_label_top = padding + 5
+    draw.text((padding + W // 2, y_label_top), "Clean (Reference)", 
+              fill='black', anchor='mt', font=font_large)
+    draw.text((padding + W + spacing + W // 2, y_label_top), "Noisy (Input)", 
+              fill='black', anchor='mt', font=font_large)
+    draw.text((padding + 2 * (W + spacing) + W // 2, y_label_top), "Denoised (Output)", 
+              fill='black', anchor='mt', font=font_large)
+    
+    # Bottom labels with metrics
+    y_label_bottom = y_offset + H + 10
+    draw.text((padding + W // 2, y_label_bottom), "Original", 
+              fill='gray', anchor='mt', font=font_small)
+    
+    # Noisy image label with metrics
+    x_noisy = padding + W + spacing + W // 2
+    y_current = y_label_bottom
+    if improvement and 'psnr_noisy' in improvement:
+        draw.text((x_noisy, y_current), f"σ = 15%", 
+                  fill='gray', anchor='mt', font=font_small)
+        y_current += 18
+        draw.text((x_noisy, y_current), f"PSNR: {improvement['psnr_noisy']:.2f} dB", 
+                  fill='gray', anchor='mt', font=font_small)
+    else:
+        draw.text((x_noisy, y_current), "σ = 15%", 
+                  fill='gray', anchor='mt', font=font_small)
+    
+    # Denoised image label with metrics and improvements
+    x_metrics = padding + 2 * (W + spacing) + W // 2
+    y_current = y_label_bottom
+    draw.text((x_metrics, y_current), "Bilateral Filter", 
+              fill='gray', anchor='mt', font=font_small)
+    
+    if psnr is not None:
+        y_current += 18  # Line spacing
+        improvement_text = f"PSNR: {psnr:.2f} dB"
+        if improvement and 'psnr_improvement' in improvement:
+            improvement_text += f" (Δ{improvement['psnr_improvement']:+.2f})"
+        draw.text((x_metrics, y_current), improvement_text, 
+                  fill='gray', anchor='mt', font=font_small)
+    
+    if ssim is not None:
+        y_current += 18  # Line spacing
+        ssim_text = f"SSIM: {ssim:.4f}"
+        if improvement and 'ssim_improvement' in improvement:
+            ssim_text += f" (Δ{improvement['ssim_improvement']:+.4f})"
+        draw.text((x_metrics, y_current), ssim_text, 
+                  fill='gray', anchor='mt', font=font_small)
+    
+    if improvement and 'mse_reduction_pct' in improvement:
+        y_current += 18  # Line spacing
+        draw.text((x_metrics, y_current), f"Noise ↓ {improvement['mse_reduction_pct']:.1f}%", 
+                  fill='green', anchor='mt', font=font_small)
+    
+    # Save
+    combined.save(output_path)
 
 
 def create_toy_example():
@@ -110,8 +246,13 @@ def run_toy_example():
     print("\nCalculating quality metrics...")
     psnr = calculate_psnr(clean_image, denoised)
     ssim = calculate_ssim(clean_image, denoised)
-    print(f"  PSNR: {psnr:.2f} dB")
-    print(f"  SSIM: {ssim:.4f}")
+    
+    # Calculate improvement metrics (noisy vs denoised)
+    improvement = calculate_improvement_metrics(clean_image, noisy_image, denoised)
+    
+    print(f"  PSNR: {psnr:.2f} dB (improvement: {improvement['psnr_improvement']:+.2f} dB)")
+    print(f"  SSIM: {ssim:.4f} (improvement: {improvement['ssim_improvement']:+.4f})")
+    print(f"  MSE reduction: {improvement['mse_reduction_pct']:.1f}%")
     
     # Test power monitoring
     print("\nTesting power monitoring...")
@@ -127,10 +268,24 @@ def run_toy_example():
     output_dir = Path("s0_data/results")
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Save individual images
     save_image(clean_image, output_dir / "toy_clean.png")
     save_image(noisy_image, output_dir / "toy_noisy.png")
     save_image(denoised, output_dir / "toy_denoised.png")
+    
+    # Create combined comparison image with labels
+    create_comparison_image(
+        clean_image,
+        noisy_image,
+        denoised,
+        output_dir / "toy_comparison.png",
+        psnr=psnr,
+        ssim=ssim,
+        improvement=improvement,
+    )
     print(f"\nSaved images to {output_dir}/")
+    print(f"  - Individual images: toy_clean.png, toy_noisy.png, toy_denoised.png")
+    print(f"  - Comparison: toy_comparison.png")
     
     print("\n✓ Toy example completed successfully!")
     return True
@@ -183,6 +338,9 @@ def benchmark_image(
     psnr = calculate_psnr(clean_3bit, denoised)
     ssim = calculate_ssim(clean_3bit, denoised)
     
+    # Calculate improvement metrics (noisy vs denoised)
+    improvement = calculate_improvement_metrics(clean_3bit, noisy_image, denoised)
+    
     # Calculate efficiency metrics
     efficiency = calculate_efficiency_metrics(psnr, results['mean_energy_j'], clean_3bit.shape)
     
@@ -191,6 +349,7 @@ def benchmark_image(
         **results,
         'psnr': psnr,
         'ssim': ssim,
+        **improvement,
         **efficiency,
         'image_path': str(image_path),
         'noise_level': noise_level,
@@ -211,7 +370,20 @@ def benchmark_image(
         save_image(clean_3bit, output_dir / f"clean_{timestamp}.png")
         save_image(noisy_image, output_dir / f"noisy_{timestamp}.png")
         save_image(denoised, output_dir / f"denoised_{timestamp}.png")
+        
+        # Create comparison image
+        create_comparison_image(
+            clean_3bit,
+            noisy_image,
+            denoised,
+            output_dir / f"comparison_{timestamp}.png",
+            psnr=psnr,
+            ssim=ssim,
+            improvement=improvement,
+        )
         print(f"\nSaved images to {output_dir}/")
+        print(f"  - Individual images: clean_{timestamp}.png, noisy_{timestamp}.png, denoised_{timestamp}.png")
+        print(f"  - Comparison: comparison_{timestamp}.png")
     
     # Export JSON
     json_path = Path("s0_data/results") / f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"

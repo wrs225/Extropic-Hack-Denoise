@@ -50,6 +50,16 @@ def display_metrics(
     if 'energy_per_pixel_nj' in metrics:
         table.add_row("Energy/Pixel", f"{metrics['energy_per_pixel_nj']:.2f}", "nJ")
     
+    # Add improvement metrics if available
+    if 'psnr_improvement' in metrics:
+        table.add_row("PSNR Improvement", f"{metrics['psnr_improvement']:+.2f}", "dB")
+    
+    if 'ssim_improvement' in metrics:
+        table.add_row("SSIM Improvement", f"{metrics['ssim_improvement']:+.4f}", "")
+    
+    if 'mse_reduction_pct' in metrics:
+        table.add_row("MSE Reduction", f"{metrics['mse_reduction_pct']:.1f}", "%")
+    
     console.print(table)
 
 

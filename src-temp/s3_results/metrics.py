@@ -59,6 +59,51 @@ def calculate_ssim(image1: np.ndarray, image2: np.ndarray) -> float:
     return float(ssim)
 
 
+def calculate_improvement_metrics(
+    original: np.ndarray,
+    noisy: np.ndarray,
+    denoised: np.ndarray,
+) -> Dict[str, float]:
+    """
+    Calculate improvement metrics comparing noisy vs denoised.
+    
+    Args:
+        original: Original clean image
+        noisy: Noisy input image
+        denoised: Denoised output image
+    
+    Returns:
+        Dictionary with improvement metrics
+    """
+    # Calculate PSNR for noisy and denoised
+    psnr_noisy = calculate_psnr(original, noisy)
+    psnr_denoised = calculate_psnr(original, denoised)
+    psnr_improvement = psnr_denoised - psnr_noisy
+    
+    # Calculate SSIM for noisy and denoised
+    ssim_noisy = calculate_ssim(original, noisy)
+    ssim_denoised = calculate_ssim(original, denoised)
+    ssim_improvement = ssim_denoised - ssim_noisy
+    
+    # Calculate MSE reduction
+    mse_noisy = np.mean((original - noisy) ** 2)
+    mse_denoised = np.mean((original - denoised) ** 2)
+    if mse_noisy > 0:
+        mse_reduction_pct = ((mse_noisy - mse_denoised) / mse_noisy) * 100.0
+    else:
+        mse_reduction_pct = 0.0
+    
+    return {
+        'psnr_noisy': float(psnr_noisy),
+        'psnr_denoised': float(psnr_denoised),
+        'psnr_improvement': float(psnr_improvement),
+        'ssim_noisy': float(ssim_noisy),
+        'ssim_denoised': float(ssim_denoised),
+        'ssim_improvement': float(ssim_improvement),
+        'mse_reduction_pct': float(mse_reduction_pct),
+    }
+
+
 def calculate_efficiency_metrics(
     psnr: float,
     energy_j: float,
