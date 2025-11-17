@@ -20,7 +20,10 @@ import time
 from thrml import SpinNode, Block, SamplingSchedule, sample_states
 from thrml.models import IsingEBM, IsingSamplingProgram
 
-from .utils import image_to_bitplanes, bitplanes_to_image
+try:
+    from .utils import image_to_bitplanes, bitplanes_to_image
+except ImportError:
+    from utils import image_to_bitplanes, bitplanes_to_image
 
 
 def build_multilayer_4connected_graph(h, w, num_layers):
@@ -83,7 +86,7 @@ class MultiLayerDenoiser:
     """Encapsulated 4-bit denoiser using multi-layer Ising machine."""
 
     def __init__(self, h=256, w=256, num_bits=4, n_warmup=20, n_samples=10, steps_per_sample=5,
-                 alpha_coef=0.5, beta_coef=1.0, temperature=1.0):
+                 alpha_coef=0.5, beta_coef=1.0, temperature=1.0, verbose=True):
         """
         Args:
             h: Image height
@@ -95,6 +98,7 @@ class MultiLayerDenoiser:
             alpha_coef: Fidelity coefficient (α_b = alpha_coef * 2^b). Higher = more faithful to noisy input
             beta_coef: Smoothness coefficient (β_b = beta_coef * 2^b). Higher = more smoothing
             temperature: Temperature parameter (beta_inv). Higher = less aggressive optimization
+            verbose: Whether to print initialization details
         """
         self.h = h
         self.w = w
@@ -105,7 +109,8 @@ class MultiLayerDenoiser:
         self.temperature = temperature
 
         # Build unified multi-layer graph
-        print("Building unified 4-layer, 4-connected graph...")
+        if verbose:
+            print("Building unified 4-layer, 4-connected graph...")
         self.all_nodes, self.flat_nodes, self.edges = build_multilayer_4connected_graph(h, w, self.num_layers)
         self.free_blocks, self.even_idx, self.odd_idx = build_multilayer_checkerboard(
             self.flat_nodes, h, w, self.num_layers
@@ -114,9 +119,10 @@ class MultiLayerDenoiser:
         self.clamped_blocks = []
         self.state_clamp = []
 
-        print(f"  Total nodes: {len(self.flat_nodes)} ({self.num_layers} layers × {h*w})")
-        print(f"  Total edges: {len(self.edges)} (4-connected within layers)")
-        print(f"  Even nodes: {len(self.even_idx)}, Odd nodes: {len(self.odd_idx)}")
+        if verbose:
+            print(f"  Total nodes: {len(self.flat_nodes)} ({self.num_layers} layers × {h*w})")
+            print(f"  Total edges: {len(self.edges)} (4-connected within layers)")
+            print(f"  Even nodes: {len(self.even_idx)}, Odd nodes: {len(self.odd_idx)}")
 
         # Sampling schedule
         self.schedule = SamplingSchedule(n_warmup=n_warmup, n_samples=n_samples, steps_per_sample=steps_per_sample)
